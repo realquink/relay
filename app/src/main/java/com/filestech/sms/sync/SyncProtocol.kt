@@ -22,6 +22,9 @@ import kotlinx.serialization.serializer
  * server answers `auth_ok` (or `auth_failed` and closes the socket).
  * After auth, the client sends `ping` every 30 s and the server answers
  * `pong`; a client silent for more than 90 s is dropped.
+ *
+ * Slice 2 adds the sync types below (`sync_request` … `sync_error`) in
+ * the same envelope; the protocol version stays 1.
  */
 object SyncProtocol {
 
@@ -114,6 +117,130 @@ object SyncProtocol {
         @SerialName("message") val message: String,
     )
 
+    // -- Slice 2: sync types (SYNC_PROTOCOL.md, §3) --------------------
+
+    /**
+     * Client → server: starts (or restarts) a sync after auth.
+     * [sinceMessageId] is the desktop's stored global cursor (max
+     * message id it has stored), or `"0"` / omitted on a first sync;
+     * ignored for [NEW_ONLY] (the cursor is set to "now").
+     */
+    @Serializable
+    data class SyncRequest(
+        @SerialName("mode") val mode: String,
+        @SerialName("since_message_id") val sinceMessageId: String? = null,
+    ) {
+        companion object {
+            /** The entire message history comes over. */
+            const val FULL = "full"
+
+            /** Only new messages from now on arrive (the list still syncs). */
+            const val NEW_ONLY = "new_only"
+        }
+    }
+
+    /**
+     * Client → server: targeted fetch — gap-fill after a dropped
+     * connection, repair of one conversation, or on-demand fetch.
+     * [beforeId] fetches messages with id strictly below it, newest
+     * first (`"0"` / omitted = newest); [limit] is capped at 200 by
+     * the server.
+     */
+    @Serializable
+    data class MessagesRequest(
+        @SerialName("conversation_id") val conversationId: String,
+        @SerialName("before_id") val beforeId: String? = null,
+        @SerialName("limit") val limit: Int? = null,
+    )
+
+    /** Server → client: first reply to `sync_request` — totals + cursor. */
+    @Serializable
+    data class SyncStarted(
+        @SerialName("mode") val mode: String,
+        @SerialName("total_conversations") val totalConversations: Int,
+        @SerialName("total_messages") val totalMessages: Long,
+        @SerialName("cursor_message_id") val cursorMessageId: String,
+    )
+
+    /** Server → client: one batch of the conversation snapshot (100 per batch). */
+    @Serializable
+    data class Conversations(
+        @SerialName("conversations") val conversations: List<SyncedConversation>,
+        @SerialName("has_more") val hasMore: Boolean,
+    )
+
+    /**
+     * Server → client: one page of one conversation, newest first.
+     * [nextBeforeId] is passed back as `before_id` for the next page;
+     * absent when [hasMore] is false.
+     */
+    @Serializable
+    data class MessagesBatch(
+        @SerialName("conversation_id") val conversationId: String,
+        @SerialName("messages") val messages: List<SyncedMessage>,
+        @SerialName("has_more") val hasMore: Boolean,
+        @SerialName("next_before_id") val nextBeforeId: String? = null,
+    )
+
+    /** Server → client: the initial stream is finished. */
+    @Serializable
+    data class SyncComplete(
+        @SerialName("cursor_message_id") val cursorMessageId: String,
+    )
+
+    /** Server → client: one live message (a burst arrives as several frames). */
+    @Serializable
+    data class MessageNew(
+        @SerialName("message") val message: SyncedMessage,
+    )
+
+    /**
+     * Server → client: a synced message changed (status, reaction,
+     * read, starred). Partial — only changed fields are present. A
+     * removed reaction cannot ride as a null `reaction` (nulls are
+     * omitted on encode), so it has its own flag: [reactionRemoved].
+     */
+    @Serializable
+    data class MessageUpdated(
+        @SerialName("message_id") val messageId: String,
+        @SerialName("conversation_id") val conversationId: String,
+        @SerialName("status") val status: String? = null,
+        @SerialName("reaction") val reaction: String? = null,
+        @SerialName("reaction_removed") val reactionRemoved: Boolean = false,
+        @SerialName("read") val read: Boolean? = null,
+        @SerialName("starred") val starred: Boolean? = null,
+    )
+
+    /** Server → client: a conversation row changed — the full row is sent. */
+    @Serializable
+    data class ConversationUpdated(
+        @SerialName("conversation") val conversation: SyncedConversation,
+    )
+
+    /** Server → client: a conversation disappeared from the phone. */
+    @Serializable
+    data class ConversationDeleted(
+        @SerialName("conversation_id") val conversationId: String,
+    )
+
+    /** Server → client: the phone cannot sync right now. */
+    @Serializable
+    data class SyncError(
+        @SerialName("code") val code: String,
+        @SerialName("message") val message: String,
+    ) {
+        companion object {
+            /** READ_SMS missing on the phone. */
+            const val HUB_NO_SMS_ACCESS = "hub_no_sms_access"
+
+            /** Permission granted, but the phone's message import hasn't run yet. */
+            const val HUB_MIRROR_EMPTY = "hub_mirror_empty"
+
+            /** Anything else; [SyncError.message] stays generic, never a stack trace. */
+            const val INTERNAL = "internal"
+        }
+    }
+
     /**
      * What the server makes of one incoming text frame. [Unknown] keeps
      * the connection (a newer client may send types this build does not
@@ -124,6 +251,8 @@ object SyncProtocol {
         data class Auth(val value: SyncProtocol.Auth) : Parsed
         data class Ping(val value: SyncProtocol.Ping) : Parsed
         data class Pong(val value: SyncProtocol.Ping) : Parsed
+        data class SyncRequest(val value: SyncProtocol.SyncRequest) : Parsed
+        data class MessagesRequest(val value: SyncProtocol.MessagesRequest) : Parsed
         data class Unknown(val type: String?) : Parsed
         data object Malformed : Parsed
     }
@@ -145,6 +274,8 @@ object SyncProtocol {
             "auth" -> decode<Auth>(obj)?.let(Parsed::Auth) ?: Parsed.Malformed
             "ping" -> decode<Ping>(obj)?.let(Parsed::Ping) ?: Parsed.Malformed
             "pong" -> decode<Ping>(obj)?.let(Parsed::Pong) ?: Parsed.Malformed
+            "sync_request" -> decode<SyncRequest>(obj)?.let(Parsed::SyncRequest) ?: Parsed.Malformed
+            "messages_request" -> decode<MessagesRequest>(obj)?.let(Parsed::MessagesRequest) ?: Parsed.Malformed
             null -> Parsed.Malformed
             else -> Parsed.Unknown(type)
         }
@@ -170,6 +301,26 @@ object SyncProtocol {
     const val REVOKED_JSON = """{"type":"revoked"}"""
 
     fun encodeError(message: String): String = withType(Error(message), "error").toString()
+
+    fun encodeSyncStarted(value: SyncStarted): String = withType(value, "sync_started").toString()
+
+    fun encodeConversations(value: Conversations): String = withType(value, "conversations").toString()
+
+    fun encodeMessagesBatch(value: MessagesBatch): String = withType(value, "messages_batch").toString()
+
+    fun encodeSyncComplete(value: SyncComplete): String = withType(value, "sync_complete").toString()
+
+    fun encodeMessageNew(value: MessageNew): String = withType(value, "message_new").toString()
+
+    fun encodeMessageUpdated(value: MessageUpdated): String = withType(value, "message_updated").toString()
+
+    fun encodeConversationUpdated(value: ConversationUpdated): String =
+        withType(value, "conversation_updated").toString()
+
+    fun encodeConversationDeleted(value: ConversationDeleted): String =
+        withType(value, "conversation_deleted").toString()
+
+    fun encodeSyncError(value: SyncError): String = withType(value, "sync_error").toString()
 
     /**
      * The `type` field is not part of the data classes (it is routing,

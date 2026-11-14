@@ -1072,4 +1072,90 @@ interface MessageDao {
         """,
     )
     suspend fun countOlderThan(olderThan: Long): Int
+
+    /**
+     * Slice 2 — one page of one conversation, newest first, keyed on
+     * [beforeId] (0 = newest page). `hidden = 0`: reaction sentinels
+     * never sync. Do NOT reuse [findRecentForConversation] for sync —
+     * it lacks the filter.
+     *
+     * Ordered by `id DESC`, not `date DESC`: paging is id-keyed (the
+     * next page filters `id < last id of this page`), so the order must
+     * match the key. A date-ordered page can skip a late-imported
+     * backfill — old date, high id — that sorts below the page boundary
+     * while its id sits above the next cursor. The desktop renders in
+     * timestamp order at read time, so batch order never affects
+     * display.
+     */
+    @Query(
+        """
+        SELECT * FROM messages
+        WHERE conversation_id = :conversationId
+          AND hidden = 0
+          AND (:beforeId = 0 OR id < :beforeId)
+        ORDER BY id DESC
+        LIMIT :limit
+        """,
+    )
+    suspend fun findBefore(conversationId: Long, beforeId: Long, limit: Int): List<MessageEntity>
+
+    /**
+     * Slice 2 — messages above [afterId], oldest first: the live path
+     * and the reconnect delta. Same `hidden = 0` filter as [findBefore].
+     * No LIMIT by design — the caller chunks what it sends.
+     */
+    @Query(
+        """
+        SELECT * FROM messages
+        WHERE conversation_id = :conversationId
+          AND hidden = 0
+          AND id > :afterId
+        ORDER BY id ASC
+        """,
+    )
+    suspend fun findAfter(conversationId: Long, afterId: Long): List<MessageEntity>
+
+    /**
+     * Slice 2 — per-conversation message counts over the syncable
+     * scope: visible messages of non-vault conversations.
+     * Conversations with no visible message produce no row.
+     */
+    @Query(
+        """
+        SELECT conversation_id, COUNT(*) AS message_count FROM messages
+        WHERE hidden = 0
+          AND conversation_id IN (SELECT id FROM conversations WHERE in_vault = 0)
+        GROUP BY conversation_id
+        """,
+    )
+    suspend fun countByConversation(): List<ConversationMessageCount>
+
+    /**
+     * Slice 2 — current max message id over the syncable scope, or
+     * null when the mirror holds no visible message. The "now" cursor
+     * for `new_only` syncs.
+     */
+    @Query(
+        """
+        SELECT MAX(id) FROM messages
+        WHERE hidden = 0
+          AND conversation_id IN (SELECT id FROM conversations WHERE in_vault = 0)
+        """,
+    )
+    suspend fun maxId(): Long?
+
+    /**
+     * Slice 2 — live states for a bounded id set. Vault conversations
+     * are excluded at the SQL level: a message whose conversation
+     * moved to the vault mid-session simply stops emitting. The
+     * caller never passes an empty list (see the repository guard).
+     */
+    @Query(
+        """
+        SELECT id, conversation_id, status, reaction_emoji, read, starred FROM messages
+        WHERE id IN (:ids)
+          AND conversation_id IN (SELECT id FROM conversations WHERE in_vault = 0)
+        """,
+    )
+    fun observeStates(ids: List<Long>): Flow<List<MessageStateRow>>
 }

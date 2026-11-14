@@ -19,6 +19,7 @@ import com.filestech.sms.domain.model.Attachment
 import com.filestech.sms.domain.model.Conversation
 import com.filestech.sms.domain.model.Message
 import com.filestech.sms.domain.model.MessageSearchHit
+import com.filestech.sms.domain.model.MessageState
 import com.filestech.sms.domain.model.MessageWindow
 import com.filestech.sms.domain.model.MessageWindowSpec
 import com.filestech.sms.domain.model.PhoneAddress
@@ -853,6 +854,66 @@ class ConversationRepositoryImpl @Inject constructor(
     // délibérée de [findMessageById] pour les chemins visibles par l'utilisateur.
     override suspend fun findMessageForResend(id: Long): Message? = withContext(io) {
         messageDao.findById(id)?.toDomain()
+    }
+
+    // Slice 2 — sync reads. All of them refuse vault conversations
+    // UNCONDITIONALLY: vault content never leaves the phone, even in
+    // an unlocked session (unlike the UI paths, which unmask once the
+    // second factor is passed). The `hidden = 0` filter lives in the
+    // DAO queries themselves.
+    override suspend fun messagesBefore(conversationId: Long, beforeId: Long, limit: Int): List<Message> =
+        withContext(io) {
+            if (isVaultConversation(conversationId)) return@withContext emptyList()
+            attachTo(messageDao.findBefore(conversationId, beforeId, limit))
+        }
+
+    override suspend fun messagesAfter(conversationId: Long, afterId: Long): List<Message> =
+        withContext(io) {
+            if (isVaultConversation(conversationId)) return@withContext emptyList()
+            attachTo(messageDao.findAfter(conversationId, afterId))
+        }
+
+    override suspend fun totalMessageCount(): Long = withContext(io) {
+        messageDao.countByConversation().sumOf { it.messageCount }.toLong()
+    }
+
+    override suspend fun messageCountsByConversation(): Map<Long, Int> = withContext(io) {
+        messageDao.countByConversation().associate { it.conversationId to it.messageCount }
+    }
+
+    override suspend fun maxMessageId(): Long = withContext(io) {
+        messageDao.maxId() ?: 0L
+    }
+
+    override fun observeMessageStates(ids: List<Long>): Flow<List<MessageState>> {
+        if (ids.isEmpty()) return flowOf(emptyList())
+        return messageDao.observeStates(ids)
+            .map { rows -> rows.map { it.toDomain() } }
+            .flowOn(io)
+    }
+
+    private suspend fun isVaultConversation(conversationId: Long): Boolean =
+        conversationDao.findById(conversationId)?.inVault == true
+
+    /**
+     * Slice 2 — joins attachments onto a page of message rows, the
+     * same bulk pattern as [observeMessages] but scoped to the page's
+     * ids ([AttachmentDao.findForMessages]) instead of the whole
+     * conversation. Pages are capped at 200 rows, well under SQLite's
+     * bound-variable cap for a single `IN` list.
+     */
+    private suspend fun attachTo(rows: List<MessageEntity>): List<Message> {
+        if (rows.isEmpty()) return emptyList()
+        val needAttachments = rows.any { it.attachmentsCount > 0 }
+        val byMessage: Map<Long, List<Attachment>> =
+            if (needAttachments) {
+                attachmentDao.findForMessages(rows.map { it.id })
+                    .groupBy { it.messageId }
+                    .mapValues { (_, list) -> list.map { it.toDomain() } }
+            } else {
+                emptyMap()
+            }
+        return rows.map { it.toDomain(byMessage[it.id].orEmpty()) }
     }
 
     // v1.6.1 (audit QUAL-01) — SAFETY_NET_DAYS centralisé dans

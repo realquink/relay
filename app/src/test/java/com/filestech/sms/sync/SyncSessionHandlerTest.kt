@@ -1,6 +1,7 @@
 package com.filestech.sms.sync
 
 import com.google.common.truth.Truth.assertThat
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -32,15 +33,19 @@ class SyncSessionHandlerTest {
     )
 
     /** One handler plus the frames it sent and the closes it asked for. */
-    private class Harness(devices: Map<String, LinkedDevice>) {
+    private class Harness(
+        devices: Map<String, LinkedDevice>,
+        engine: SyncEngine? = null,
+        val sent: MutableList<String> = mutableListOf(),
+    ) {
         val lookup = FakeLookup(devices)
-        val sent = mutableListOf<String>()
         val closes = mutableListOf<String>()
         val handler = SyncSessionHandler(
             lookup = lookup,
             hubId = HUB_ID,
             send = { sent += it },
             close = { closes += it },
+            engine = engine,
         )
 
         /** The reason of the last `auth_failed` frame, or null. */
@@ -151,6 +156,55 @@ class SyncSessionHandlerTest {
             .isEqualTo(SyncProtocol.Parsed.Pong(SyncProtocol.Ping(t = 4242L)))
         assertThat(harness.lookup.touched).contains(DEVICE_ID)
         assertThat(harness.closes).isEmpty()
+    }
+
+    @Test fun `sync_request before auth fails with protocol`() = runTest {
+        val harness = Harness(mapOf(DEVICE_ID to device))
+        harness.handler.onText("""{"type":"sync_request","mode":"full"}""")
+        assertThat(harness.lastAuthFailedReason())
+            .isEqualTo(SyncProtocol.AuthFailed.PROTOCOL)
+        assertThat(harness.closes).hasSize(1)
+    }
+
+    @Test fun `messages_request before auth fails with protocol`() = runTest {
+        val harness = Harness(mapOf(DEVICE_ID to device))
+        harness.handler.onText("""{"type":"messages_request","conversation_id":"1"}""")
+        assertThat(harness.lastAuthFailedReason())
+            .isEqualTo(SyncProtocol.AuthFailed.PROTOCOL)
+        assertThat(harness.closes).hasSize(1)
+    }
+
+    @Test fun `sync_request after auth without an engine answers error and stays open`() = runTest {
+        val harness = authenticatedHarness()
+        harness.handler.onText("""{"type":"sync_request","mode":"full"}""")
+        val error = Json.parseToJsonElement(harness.sent.last()).jsonObject
+        assertThat(error["type"]?.jsonPrimitive?.content).isEqualTo("error")
+        assertThat(harness.closes).isEmpty()
+        assertThat(harness.handler.isAuthenticated).isTrue()
+    }
+
+    @Test fun `sync_request after auth dispatches to the engine`() = runTest {
+        val source = FakeSyncMessageSource()
+        source.snapshot = listOf(sampleConversation(id = 1))
+        val sent = mutableListOf<String>()
+        val engine = SyncEngine(source, this, send = { sent += it })
+        try {
+            val harness = Harness(mapOf(DEVICE_ID to device), engine, sent)
+            harness.handler.onText(helloJson())
+            harness.handler.onText(authJson(harness.challengeBytes()))
+            assertThat(harness.handler.isAuthenticated).isTrue()
+            advanceUntilIdle()
+            harness.handler.onText("""{"type":"sync_request","mode":"full"}""")
+            advanceUntilIdle()
+            val types = sent.map {
+                Json.parseToJsonElement(it).jsonObject["type"]?.jsonPrimitive?.content
+            }
+            assertThat(types).contains("sync_started")
+            assertThat(types).contains("sync_complete")
+            assertThat(harness.closes).isEmpty()
+        } finally {
+            engine.stop()
+        }
     }
 
     @Test fun `malformed frame before auth fails with protocol`() = runTest {

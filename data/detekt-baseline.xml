@@ -98,6 +98,7 @@
     <ID>ThrowsCount:DatabaseKeyManager.kt$DatabaseKeyManager$private fun generateAndWrap(): ByteArray</ID>
     <ID>ThrowsCount:DatabaseKeyManager.kt$DatabaseKeyManager$private fun unwrap(): ByteArray</ID>
     <ID>TooManyFunctions:ConversationDao.kt$ConversationDao</ID>
+    <ID>TooManyFunctions:ConversationRepositoryImpl.kt$ConversationRepositoryImpl : ConversationRepository</ID>
     <ID>TooManyFunctions:MessageDao.kt$MessageDao</ID>
     <ID>UnusedImports:SettingsRepository.kt$import kotlinx.coroutines.flow.first</ID>
     <ID>UnusedPrivateMember:TelephonyReader.kt$TelephonyReader$private fun readMmsParts(mmsId: Long): Pair&lt;String, List&lt;MmsPartImport&gt;&gt;</ID>

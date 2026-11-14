@@ -1,5 +1,6 @@
 package com.filestech.sms.data.local.db.mapper
 
+import com.filestech.sms.data.local.db.dao.MessageStateRow
 import com.filestech.sms.data.local.db.entity.AttachmentEntity
 import com.filestech.sms.data.local.db.entity.BlockedNumberEntity
 import com.filestech.sms.data.local.db.entity.ConversationEntity
@@ -11,6 +12,7 @@ import com.filestech.sms.domain.model.BlockedNumber
 import com.filestech.sms.domain.model.Conversation
 import com.filestech.sms.domain.model.Message
 import com.filestech.sms.domain.model.MessageDirection
+import com.filestech.sms.domain.model.MessageState
 import com.filestech.sms.domain.model.MessageStatus
 import com.filestech.sms.domain.model.MessageType
 import com.filestech.sms.domain.model.PhoneAddress
@@ -113,6 +115,16 @@ internal fun mapDirection(direction: MessageDirection): Message.Direction = when
     MessageDirection.INCOMING -> Message.Direction.INCOMING
     MessageDirection.OUTGOING -> Message.Direction.OUTGOING
 }
+
+/** Slice 2 — the states-watch projection, straight to its domain model. */
+fun MessageStateRow.toDomain(): MessageState = MessageState(
+    id = id,
+    conversationId = conversationId,
+    status = mapStatus(status),
+    reactionEmoji = reactionEmoji,
+    read = read,
+    starred = starred,
+)
 
 fun QuickReplyEntity.toDomain(): QuickReply = QuickReply(
     id = id,

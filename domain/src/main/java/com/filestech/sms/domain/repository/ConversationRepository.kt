@@ -5,6 +5,7 @@ import com.filestech.sms.domain.model.Attachment
 import com.filestech.sms.domain.model.Conversation
 import com.filestech.sms.domain.model.Message
 import com.filestech.sms.domain.model.MessageSearchHit
+import com.filestech.sms.domain.model.MessageState
 import com.filestech.sms.domain.model.MessageWindow
 import com.filestech.sms.domain.model.MessageWindowSpec
 import com.filestech.sms.domain.model.PhoneAddress
@@ -218,4 +219,35 @@ interface ConversationRepository {
      * voir `ConversationEraser.purgeHistory` pour la regle qui separe ce cas de celui du coffre.
      */
     suspend fun purgeHistoryNow(olderThanDays: Int): Int
+
+    /**
+     * Slice 2 — one page of one conversation, newest first: ids
+     * strictly below [beforeId] (0 = newest), at most [limit] rows.
+     * Reaction sentinels (`hidden = 1`) never appear; a vault
+     * conversation yields nothing. Attachments are joined.
+     */
+    suspend fun messagesBefore(conversationId: Long, beforeId: Long, limit: Int): List<Message>
+
+    /**
+     * Slice 2 — messages with id strictly above [afterId], oldest
+     * first: the live path and the reconnect delta. Same filters as
+     * [messagesBefore].
+     */
+    suspend fun messagesAfter(conversationId: Long, afterId: Long): List<Message>
+
+    /** Slice 2 — total message count over all non-vault conversations (sentinels excluded). */
+    suspend fun totalMessageCount(): Long
+
+    /** Slice 2 — per-conversation message counts, same scope as [totalMessageCount]. */
+    suspend fun messageCountsByConversation(): Map<Long, Int>
+
+    /** Slice 2 — current max message id (0 when the mirror is empty). */
+    suspend fun maxMessageId(): Long
+
+    /**
+     * Slice 2 — live states for a bounded id set, re-emitted on
+     * change. Empty [ids] yields one empty emission (never an invalid
+     * `IN ()` query).
+     */
+    fun observeMessageStates(ids: List<Long>): Flow<List<MessageState>>
 }

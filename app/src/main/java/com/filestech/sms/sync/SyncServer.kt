@@ -60,7 +60,9 @@ import javax.inject.Singleton
  * Lifecycle is owned by [SyncService] (start/stop follow the server
  * toggle); this class only runs the engine. The auth state machine
  * lives in [SyncSessionHandler] — this file is the Ktor wiring around
- * it, nothing more.
+ * it, nothing more. Each session gets its own [SyncEngine], fed by
+ * the injected [SyncMessageSource]; the engine is cancelled when the
+ * session ends.
  *
  * Own [CoroutineScope] (SupervisorJob + IO) instead of the app's
  * application scope: the sync package imports no app code, so it
@@ -72,6 +74,7 @@ class SyncServer @Inject constructor(
     private val store: LinkedDeviceStore,
     private val tlsProvider: TlsCertificateProvider,
     private val mdnsAdvertiser: MdnsAdvertiser,
+    private val messageSource: SyncMessageSource,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val startStopMutex = Mutex()
@@ -179,20 +182,26 @@ class SyncServer @Inject constructor(
     }
 
     /**
-     * One socket's lifetime: a fresh state machine, a 10 s auth
-     * watchdog, then the frame loop. Binary frames are ignored — the
-     * protocol is JSON text. Any socket error just ends the session;
-     * Ktor logs its own detail.
+     * One socket's lifetime: a fresh state machine, a fresh sync
+     * engine, a 10 s auth watchdog, then the frame loop. Binary frames
+     * are ignored — the protocol is JSON text. Any socket error just
+     * ends the session; Ktor logs its own detail.
      */
     private suspend fun handleSession(
         session: WebSocketServerSession,
         hubId: String,
     ) {
+        val engine = SyncEngine(
+            source = messageSource,
+            parentScope = session,
+            send = { text -> session.send(Frame.Text(text)) },
+        )
         val handler = SyncSessionHandler(
             lookup = store,
             hubId = hubId,
             send = { text -> session.send(Frame.Text(text)) },
             close = { reason -> session.close(CloseReason(CloseReason.Codes.NORMAL, reason)) },
+            engine = engine,
         )
         sessions[handler] = Unit
         val authTimeout = session.launch {
@@ -218,6 +227,7 @@ class SyncServer @Inject constructor(
             Timber.d(t, "SyncServer: session ended")
         } finally {
             authTimeout.cancel()
+            engine.stop()
             sessions.remove(handler)
             refreshConnected()
         }

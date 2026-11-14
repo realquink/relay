@@ -15,15 +15,23 @@ import java.util.Base64
  * close after it. The challenge is issued to any client — the device
  * check happens at `auth`, against the stored public key.
  *
+ * After auth, the sync frames (`sync_request`, `messages_request`)
+ * are dispatched to the per-session [SyncEngine]; the engine starts
+ * its live collectors the moment auth succeeds.
+ *
  * @param send carries one outbound text frame to the client.
  * @param close closes the socket; [reason] is a short human-readable
  * cause (never a secret) for the close frame.
+ * @param engine the session's sync engine, or null when the session
+ * has none (tests): sync frames then answer `error` instead of
+ * crashing.
  */
 class SyncSessionHandler(
     private val lookup: LinkedDeviceLookup,
     private val hubId: String,
     private val send: suspend (String) -> Unit,
     private val close: suspend (String) -> Unit,
+    private val engine: SyncEngine? = null,
 ) {
     /** The linked device id once auth has succeeded, null before. */
     var deviceId: String? = null
@@ -48,6 +56,8 @@ class SyncSessionHandler(
             is SyncProtocol.Parsed.Auth -> onAuth(parsed.value)
             is SyncProtocol.Parsed.Ping -> onPing(parsed.value)
             is SyncProtocol.Parsed.Pong -> Unit // the server never pings; a stray pong is harmless
+            is SyncProtocol.Parsed.SyncRequest -> onSyncRequest(parsed.value)
+            is SyncProtocol.Parsed.MessagesRequest -> onMessagesRequest(parsed.value)
             is SyncProtocol.Parsed.Unknown -> onUnknown(parsed.type)
             SyncProtocol.Parsed.Malformed -> onProtocolViolation()
         }
@@ -112,6 +122,9 @@ class SyncSessionHandler(
         pendingHelloDeviceId = null
         deviceId = device.deviceId
         lookup.touchLastSeen(device.deviceId, System.currentTimeMillis())
+        // Live push runs from auth onwards, concurrently with the
+        // initial stream the client is about to request.
+        engine?.start()
         send(
             SyncProtocol.encodeAuthOk(
                 SyncProtocol.AuthOk(hubId = hubId, hubName = SyncProtocol.HUB_NAME),
@@ -127,6 +140,37 @@ class SyncSessionHandler(
         }
         lookup.touchLastSeen(id, System.currentTimeMillis())
         send(SyncProtocol.encodePong(ping))
+    }
+
+    /**
+     * Sync frames need auth, like `ping`. The engine only starts the
+     * stream job here — the stream itself runs in the engine's scope,
+     * never on the frame loop.
+     */
+    private suspend fun onSyncRequest(request: SyncProtocol.SyncRequest) {
+        if (!isAuthenticated) {
+            onProtocolViolation()
+            return
+        }
+        val syncEngine = engine
+        if (syncEngine == null) {
+            send(SyncProtocol.encodeError("sync unavailable"))
+            return
+        }
+        syncEngine.onSyncRequest(request)
+    }
+
+    private suspend fun onMessagesRequest(request: SyncProtocol.MessagesRequest) {
+        if (!isAuthenticated) {
+            onProtocolViolation()
+            return
+        }
+        val syncEngine = engine
+        if (syncEngine == null) {
+            send(SyncProtocol.encodeError("sync unavailable"))
+            return
+        }
+        syncEngine.onMessagesRequest(request)
     }
 
     private suspend fun onUnknown(type: String?) {
