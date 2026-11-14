@@ -4,8 +4,8 @@ import com.google.common.truth.Truth.assertThat
 import io.ktor.server.application.install
 import io.ktor.server.engine.applicationEnvironment
 import io.ktor.server.engine.embeddedServer
-import io.ktor.server.engine.sslConnector
 import io.ktor.server.netty.Netty
+import io.ktor.server.netty.NettyApplicationEngine
 import io.ktor.server.routing.routing
 import io.ktor.server.websocket.WebSockets
 import io.ktor.server.websocket.webSocket
@@ -53,16 +53,17 @@ class SyncEngineTlsTest {
             Netty,
             applicationEnvironment { },
             configure = {
-                sslConnector(
-                    identity.keyStore,
-                    identity.alias,
-                    { identity.password },
-                    { identity.password },
-                ) {
-                    host = "127.0.0.1"
-                    this.port = port
-                    enabledProtocols = SyncProtocol.TLS_PROTOCOLS
-                }
+                SyncServer.configureEngine(
+                    this,
+                    TlsIdentity(
+                        identity.keyStore,
+                        identity.alias,
+                        identity.password,
+                        identity.password,
+                    ),
+                    "127.0.0.1",
+                    port,
+                )
             },
         ) {
             install(WebSockets)
@@ -76,6 +77,29 @@ class SyncEngineTlsTest {
         } finally {
             runCatching { server.stop(500L, 2_000L) }
         }
+    }
+
+    /**
+     * Regression test for the 2026-11-14 link failure: with HTTP/2 on
+     * (Ktor's default), the server negotiates ALPN — and Netty's ALPN
+     * engine kills the handshake at the finish line when the client
+     * offers no ALPN extension, which the desktop client doesn't
+     * (AssertionError in JdkAlpnSslEngine). The sync protocol is one
+     * WebSocket over HTTP/1.1, so H2 stays off.
+     */
+    @Test fun `the sync engine disables HTTP2`() {
+        val identity = testIdentity()
+        val config = NettyApplicationEngine.Configuration()
+        SyncServer.configureEngine(
+            config,
+            TlsIdentity(
+                identity.keyStore,
+                identity.alias,
+                identity.password,
+                identity.password,
+            ),
+        )
+        assertThat(config.enableHttp2).isFalse()
     }
 
     /**

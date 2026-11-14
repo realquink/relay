@@ -6,6 +6,7 @@ import io.ktor.server.engine.applicationEnvironment
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.engine.sslConnector
 import io.ktor.server.netty.Netty
+import io.ktor.server.netty.NettyApplicationEngine
 import io.ktor.server.routing.routing
 import io.ktor.server.websocket.WebSocketServerSession
 import io.ktor.server.websocket.WebSockets
@@ -46,6 +47,15 @@ import javax.inject.Singleton
  * WebSocket support. `SyncEngineTlsTest` pins this: it boots the same
  * wiring and probes the port, so a future engine swap that drops TLS
  * fails the test instead of the app.
+ *
+ * HTTP/2 is off (`enableHttp2 = false` in [configureEngine]): Ktor
+ * enables it by default, which turns on ALPN negotiation ("h2",
+ * "http/1.1") — and Netty's ALPN engine kills the handshake at the
+ * finish line when the client offers no ALPN extension, which our
+ * desktop client doesn't (AssertionError in JdkAlpnSslEngine, seen
+ * on device 2026-11-14: the crypto all succeeded, then the channel
+ * died). The sync protocol is one WebSocket over HTTP/1.1, so H2
+ * buys nothing.
  *
  * Lifecycle is owned by [SyncService] (start/stop follow the server
  * toggle); this class only runs the engine. The auth state machine
@@ -101,18 +111,7 @@ class SyncServer @Inject constructor(
             val server = embeddedServer(
                 Netty,
                 applicationEnvironment { },
-                configure = {
-                    sslConnector(
-                        identity.keyStore,
-                        identity.keyAlias,
-                        { identity.keyPassword },
-                        { identity.storePassword },
-                    ) {
-                        host = "0.0.0.0"
-                        port = SyncProtocol.PORT
-                        enabledProtocols = SyncProtocol.TLS_PROTOCOLS
-                    }
-                },
+                configure = { configureEngine(this, identity) },
             ) {
                 install(WebSockets)
                 routing {
@@ -232,5 +231,40 @@ class SyncServer @Inject constructor(
         /** Grace period / hard timeout for the engine's stop. */
         private const val GRACE_PERIOD_MS = 500L
         private const val TIMEOUT_MS = 2_000L
+
+        /**
+         * The engine's configuration, shared by [SyncServer.start] and
+         * [SyncEngineTlsTest] so the test boots the exact wiring the
+         * app runs. TLS only: there is deliberately no plain-text
+         * connector anywhere.
+         *
+         * HTTP/2 is off: Ktor enables it by default, which turns on
+         * ALPN negotiation ("h2", "http/1.1") — and Netty's ALPN
+         * engine kills the handshake at the finish line when the
+         * client offers no ALPN extension, which our desktop client
+         * doesn't (AssertionError in JdkAlpnSslEngine, seen on device
+         * 2026-11-14). The sync protocol is one WebSocket over
+         * HTTP/1.1, so H2 buys nothing.
+         */
+        internal fun configureEngine(
+            config: NettyApplicationEngine.Configuration,
+            identity: TlsIdentity,
+            host: String = "0.0.0.0",
+            port: Int = SyncProtocol.PORT,
+        ) {
+            config.enableHttp2 = false
+            with(config) {
+                sslConnector(
+                    identity.keyStore,
+                    identity.keyAlias,
+                    { identity.keyPassword },
+                    { identity.storePassword },
+                ) {
+                    this.host = host
+                    this.port = port
+                    enabledProtocols = SyncProtocol.TLS_PROTOCOLS
+                }
+            }
+        }
     }
 }
