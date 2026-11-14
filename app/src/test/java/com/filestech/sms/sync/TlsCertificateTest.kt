@@ -47,6 +47,23 @@ class TlsCertificateTest {
         assertThat(first.subjectX500Principal).isEqualTo(second.subjectX500Principal)
     }
 
+    @Test fun `a key authorized for SHA-256 only does not cover TLS digests`() {
+        // The pre-fix keystore key: the handshake's signature scheme is
+        // the client's pick, and clients offer SHA-384/SHA-512 schemes
+        // first, so this key failed every handshake (INCOMPATIBLE_DIGEST).
+        assertThat(
+            TlsCertificateProvider.authorizesRequiredDigests(setOf("SHA-256")),
+        ).isFalse()
+    }
+
+    @Test fun `a key authorized for all three SHA-2 digests covers TLS digests`() {
+        assertThat(
+            TlsCertificateProvider.authorizesRequiredDigests(
+                setOf("SHA-256", "SHA-384", "SHA-512"),
+            ),
+        ).isTrue()
+    }
+
     companion object {
         private const val HUB_ID = "123e4567-e89b-12d3-a456-426614174099"
 
