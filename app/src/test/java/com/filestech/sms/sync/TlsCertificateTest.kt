@@ -48,18 +48,29 @@ class TlsCertificateTest {
     }
 
     @Test fun `a key authorized for SHA-256 only does not cover TLS digests`() {
-        // The pre-fix keystore key: the handshake's signature scheme is
-        // the client's pick, and clients offer SHA-384/SHA-512 schemes
-        // first, so this key failed every handshake (INCOMPATIBLE_DIGEST).
+        // The original keystore key: no DIGEST_NONE, so the TLS stack —
+        // which signs a pre-computed digest — failed every handshake
+        // (INCOMPATIBLE_DIGEST).
         assertThat(
             TlsCertificateProvider.authorizesRequiredDigests(setOf("SHA-256")),
         ).isFalse()
     }
 
-    @Test fun `a key authorized for all three SHA-2 digests covers TLS digests`() {
+    @Test fun `a key authorized for all three SHA-2 digests but no NONE does not cover TLS digests`() {
+        // The first fix's key: all three SHA-2 digests, still no NONE —
+        // it failed every handshake exactly like the SHA-256-only key
+        // (seen on device 2026-11-14).
         assertThat(
             TlsCertificateProvider.authorizesRequiredDigests(
                 setOf("SHA-256", "SHA-384", "SHA-512"),
+            ),
+        ).isFalse()
+    }
+
+    @Test fun `a key authorized for NONE plus all three SHA-2 digests covers TLS digests`() {
+        assertThat(
+            TlsCertificateProvider.authorizesRequiredDigests(
+                setOf("NONE", "SHA-256", "SHA-384", "SHA-512"),
             ),
         ).isTrue()
     }
